@@ -1,9 +1,9 @@
-use crate::domain::Money;
+use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TransactionKind {
-    Deposit { amount: Money },
-    Withdrawal { amount: Money },
+    Deposit { amount: Decimal },
+    Withdrawal { amount: Decimal },
     Dispute,
     Resolve,
     Chargeback,
@@ -14,16 +14,6 @@ pub struct Transaction {
     pub kind: TransactionKind,
     pub client_id: u16,
     pub transaction_id: u32,
-}
-
-impl Transaction {
-    pub fn new(kind: TransactionKind, client_id: u16, transaction_id: u32) -> Self {
-        Self {
-            kind,
-            client_id,
-            transaction_id,
-        }
-    }
 }
 
 impl core::fmt::Display for Transaction {

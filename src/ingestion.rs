@@ -2,10 +2,11 @@ use std::io::Read;
 use std::pin::Pin;
 
 use futures::stream::{self, Stream};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::domain::traits::TransactionStream;
-use crate::domain::{Error, Money, Transaction, TransactionKind};
+use crate::domain::{Error, Transaction, TransactionKind};
 
 pub struct CsvReader<R: Read> {
     reader: Option<csv::Reader<R>>,
@@ -29,7 +30,7 @@ struct CsvRow {
     kind: String,
     client: u16,
     tx: u32,
-    amount: Option<Money>,
+    amount: Option<Decimal>,
 }
 
 impl TryFrom<CsvRow> for Transaction {
@@ -43,7 +44,7 @@ impl TryFrom<CsvRow> for Transaction {
             ("resolve", None) => TransactionKind::Resolve,
             ("chargeback", None) => TransactionKind::Chargeback,
             (other, _) => {
-                return Err(Error::IngestionError(format!(
+                return Err(Error::Ingestion(format!(
                     "Invalid transaction type: {}",
                     other
                 )));
@@ -76,7 +77,7 @@ impl<R: Read + Send + 'static> TransactionStream for CsvReader<R> {
             .into_deserialize::<CsvRow>()
             .map(|row_res| match row_res {
                 Ok(row) => Transaction::try_from(row),
-                Err(e) => Err(Error::IngestionError(format!(
+                Err(e) => Err(Error::Ingestion(format!(
                     "CSV deserialization error: {}",
                     e
                 ))),

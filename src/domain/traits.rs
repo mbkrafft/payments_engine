@@ -22,4 +22,10 @@ pub trait OutputRepository {
     ) -> Result<(), Error>;
 
     fn get_transaction(&mut self, transaction_id: u32) -> Option<&Transaction>;
+
+    fn mark_transaction_disputed(&mut self, transaction_id: u32);
+
+    fn mark_transaction_resolved(&mut self, transaction_id: u32);
+
+    fn has_dispute(&self, transaction_id: u32) -> bool;
 }

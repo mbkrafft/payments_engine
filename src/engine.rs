@@ -67,66 +67,19 @@ where
         }
     }
 
-    fn chargeback(&mut self, tx: Transaction) -> Result<(), Error> {
-        let chargeback_tx = self
+    fn deposit(&mut self, tx: &Transaction, amount: rust_decimal::Decimal) -> Result<(), Error> {
+        match self
             .output_repository
-            .get_transaction(tx.transaction_id)
-            .ok_or_else(|| Error::Engine("Referenced transaction not found".to_string()))?;
-        if chargeback_tx.client_id != tx.client_id {
-            return Err(Error::Engine(
-                "Transaction client ID does not match resolve client ID".to_string(),
-            ));
-        }
-        if let TransactionKind::Deposit { amount } | TransactionKind::Withdrawal { amount } =
-            chargeback_tx.kind
+            .report_transaction(&tx.transaction_id, tx)
         {
-            // (Only if orig_tx was under dispute)
-            let acct = self.output_repository.get_or_create_account(&tx.client_id);
-            acct.available += amount;
-            acct.held -= amount;
+            Ok(_) => {
+                let account = self.output_repository.get_or_create_account(&tx.client_id);
+                account.available += amount;
+                account.sync_total();
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
-        Ok(())
-    }
-
-    fn resolve(&mut self, tx: &Transaction) -> Result<(), Error> {
-        let resolved_tx = self
-            .output_repository
-            .get_transaction(tx.transaction_id)
-            .ok_or_else(|| Error::Engine("Referenced transaction not found".to_string()))?;
-        if resolved_tx.client_id != tx.client_id {
-            return Err(Error::Engine(
-                "Transaction client ID does not match resolve client ID".to_string(),
-            ));
-        }
-        if let TransactionKind::Deposit { amount } | TransactionKind::Withdrawal { amount } =
-            resolved_tx.kind
-        {
-            // (Only if orig_tx was under dispute)
-            let acct = self.output_repository.get_or_create_account(&tx.client_id);
-            acct.available += amount;
-            acct.held -= amount;
-        }
-        Ok(())
-    }
-
-    fn dispute(&mut self, tx: &Transaction) -> Result<(), Error> {
-        let disputed_tx = self
-            .output_repository
-            .get_transaction(tx.transaction_id)
-            .ok_or_else(|| Error::Engine("Referenced transaction not found".to_string()))?;
-        if disputed_tx.client_id != tx.client_id {
-            return Err(Error::Engine(
-                "Transaction client ID does not match dispute client ID".to_string(),
-            ));
-        }
-        if let TransactionKind::Deposit { amount } | TransactionKind::Withdrawal { amount } =
-            disputed_tx.kind
-        {
-            let acct = self.output_repository.get_or_create_account(&tx.client_id);
-            acct.available -= amount;
-            acct.held += amount;
-        }
-        Ok(())
     }
 
     fn withraw(&mut self, tx: &Transaction, amount: rust_decimal::Decimal) -> Result<(), Error> {
@@ -152,19 +105,94 @@ where
         }
     }
 
-    fn deposit(&mut self, tx: &Transaction, amount: rust_decimal::Decimal) -> Result<(), Error> {
-        match self
+    fn dispute(&mut self, tx: &Transaction) -> Result<(), Error> {
+        let disputed_tx = self
             .output_repository
-            .report_transaction(&tx.transaction_id, tx)
-        {
-            Ok(_) => {
-                let account = self.output_repository.get_or_create_account(&tx.client_id);
-                account.available += amount;
-                account.sync_total();
-                Ok(())
-            }
-            Err(e) => Err(e),
+            .get_transaction(tx.transaction_id)
+            .ok_or_else(|| Error::Engine("Referenced transaction not found".to_string()))?;
+
+        if disputed_tx.client_id != tx.client_id {
+            return Err(Error::Engine(
+                "Transaction client ID does not match dispute client ID".to_string(),
+            ));
         }
+
+        if let TransactionKind::Deposit { amount } | TransactionKind::Withdrawal { amount } =
+            disputed_tx.kind
+        {
+            {
+                self.output_repository
+                    .mark_transaction_disputed(tx.transaction_id);
+            }
+            let account = self.output_repository.get_or_create_account(&tx.client_id);
+            account.available -= amount;
+            account.held += amount;
+        }
+
+        Ok(())
+    }
+
+    fn resolve(&mut self, tx: &Transaction) -> Result<(), Error> {
+        {
+            if !self.output_repository.has_dispute(tx.transaction_id) {
+                return Err(Error::Engine("Transaction is not disputed".to_string()));
+            }
+        }
+
+        let resolved_tx = self
+            .output_repository
+            .get_transaction(tx.transaction_id)
+            .ok_or_else(|| Error::Engine("Referenced transaction not found".to_string()))?;
+
+        if resolved_tx.client_id != tx.client_id {
+            return Err(Error::Engine(
+                "Transaction client ID does not match resolve client ID".to_string(),
+            ));
+        }
+
+        if let TransactionKind::Deposit { amount } | TransactionKind::Withdrawal { amount } =
+            resolved_tx.kind
+        {
+            {
+                self.output_repository
+                    .mark_transaction_resolved(tx.transaction_id);
+            }
+
+            let account = self.output_repository.get_or_create_account(&tx.client_id);
+            account.available += amount;
+            account.held -= amount;
+        }
+        Ok(())
+    }
+
+    fn chargeback(&mut self, tx: Transaction) -> Result<(), Error> {
+        {
+            if !self.output_repository.has_dispute(tx.transaction_id) {
+                return Err(Error::Engine("Transaction is not disputed".to_string()));
+            }
+        }
+
+        let chargeback_tx = self
+            .output_repository
+            .get_transaction(tx.transaction_id)
+            .ok_or_else(|| Error::Engine("Referenced transaction not found".to_string()))?;
+
+        if chargeback_tx.client_id != tx.client_id {
+            return Err(Error::Engine(
+                "Transaction client ID does not match resolve client ID".to_string(),
+            ));
+        }
+
+        if let TransactionKind::Deposit { amount } | TransactionKind::Withdrawal { amount } =
+            chargeback_tx.kind
+        {
+            // (Only if orig_tx was under dispute)
+            let account = self.output_repository.get_or_create_account(&tx.client_id);
+            account.available += amount;
+            account.held -= amount;
+            account.locked = true;
+        }
+        Ok(())
     }
 
     pub fn flush(&mut self) {

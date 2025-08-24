@@ -13,9 +13,17 @@ fn end_to_end_outputs_expected_balances() {
     writeln!(
         file,
         "type, client, tx, amount\n\
-deposit, 1, 1, 1.0001\n\
-deposit, 1, 2, 0.5003\n\
-deposit, 2, 3, 2.0003"
+    deposit, 1, 1, 100.0003\n\
+    deposit, 2, 2, 50.0001\n\
+    withdrawal, 1, 3, 30.0\n\
+    dispute, 1, 1,\n\
+    resolve, 1, 1,\n\
+    withdrawal, 2, 4, 60.0\n\
+    chargeback, 1, 1,\n\
+    chah, 1,\n\
+    chargeback, 1, 1\n\
+    dispute, 2, 2,\n\
+    chargeback, 2, 2"
     )
     .unwrap();
 
@@ -26,6 +34,6 @@ deposit, 2, 3, 2.0003"
     cmd.assert()
         .success()
         .stdout(pred::str::contains("client,available,held,total,locked"))
-        .stdout(pred::str::contains("1,1.5004,0,1.5004,false"))
-        .stdout(pred::str::contains("2,2.0003,0,2.0003,false"));
+        .stdout(pred::str::contains("1,70.0003,0.0000,70.0003,false"))
+        .stdout(pred::str::contains("2,50.0001,0.0000,50.0001,true"));
 }

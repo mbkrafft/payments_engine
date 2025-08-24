@@ -6,7 +6,7 @@ use std::collections::hash_map::Entry;
 #[derive(Default, Debug)]
 pub struct StdOutOutput {
     accounts: HashMap<u16, Account>,
-    ledger: HashMap<u32, Transaction>,
+    ledger: HashMap<u32, (Transaction, bool)>,
 }
 
 impl StdOutOutput {
@@ -30,7 +30,7 @@ impl OutputRepository for StdOutOutput {
     ) -> Result<(), Error> {
         match self.ledger.entry(*transaction_id) {
             Entry::Vacant(e) => {
-                e.insert(transaction.clone());
+                e.insert((transaction.clone(), false));
                 Ok(())
             }
             Entry::Occupied(_) => Err(Error::Engine(format!(
@@ -41,7 +41,7 @@ impl OutputRepository for StdOutOutput {
     }
 
     fn get_transaction(&mut self, transaction_id: u32) -> Option<&Transaction> {
-        self.ledger.get(&transaction_id)
+        self.ledger.get(&transaction_id).map(|(tx, _)| tx)
     }
 
     fn flush(&mut self) {
@@ -56,5 +56,24 @@ impl OutputRepository for StdOutOutput {
                 account.locked
             );
         }
+    }
+
+    fn mark_transaction_disputed(&mut self, transaction_id: u32) {
+        if let Some((_, disputed)) = self.ledger.get_mut(&transaction_id) {
+            *disputed = true;
+        }
+    }
+
+    fn mark_transaction_resolved(&mut self, transaction_id: u32) {
+        if let Some((_, disputed)) = self.ledger.get_mut(&transaction_id) {
+            *disputed = false;
+        }
+    }
+
+    fn has_dispute(&self, transaction_id: u32) -> bool {
+        self.ledger
+            .get(&transaction_id)
+            .map(|(_, disputed)| *disputed)
+            .unwrap_or(false)
     }
 }

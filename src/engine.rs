@@ -199,3 +199,166 @@ where
         self.output_repository.flush();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output_repository::StdOutOutput;
+    use futures::stream::{self, Stream};
+    use rust_decimal::Decimal;
+    use std::pin::Pin;
+
+    #[derive(Debug, Default)]
+    struct NoopIngestion;
+
+    impl TransactionStream for NoopIngestion {
+        type TxStream = Pin<Box<dyn Stream<Item = Result<Transaction, Error>> + Send>>;
+        fn stream(&mut self) -> Self::TxStream {
+            Box::pin(stream::iter(Vec::<Result<Transaction, Error>>::new()))
+        }
+    }
+
+    #[derive(Default, Debug)]
+    struct NoopDLQ;
+
+    impl DeadLetterQueue for NoopDLQ {
+        fn report(&self, _error: &Error) {}
+    }
+
+    fn mk_engine() -> Engine<NoopIngestion, StdOutOutput, NoopDLQ> {
+        Engine::new(NoopIngestion, StdOutOutput::new(), NoopDLQ)
+    }
+
+    #[test]
+    fn deposit_increases_available_and_total() {
+        let mut engine = mk_engine();
+        let tx = Transaction {
+            kind: TransactionKind::Deposit {
+                amount: Decimal::from(100u32),
+            },
+            client_id: 1,
+            transaction_id: 1,
+        };
+
+        engine
+            .deposit(&tx, Decimal::from(100u32))
+            .expect("deposit ok");
+
+        let acct = engine.output_repository.get_or_create_account(&1);
+        assert_eq!(acct.available, Decimal::from(100u32));
+        assert_eq!(acct.held, Decimal::from(0u32));
+        assert_eq!(acct.total, Decimal::from(100u32));
+        assert!(!acct.locked);
+    }
+
+    #[test]
+    fn withdrawal_with_insufficient_funds_errors_and_does_not_change_balances() {
+        let mut engine = mk_engine();
+        let tx = Transaction {
+            kind: TransactionKind::Withdrawal {
+                amount: Decimal::from(50u32),
+            },
+            client_id: 1,
+            transaction_id: 2,
+        };
+
+        let res = engine.withraw(&tx, Decimal::from(50u32));
+        assert!(res.is_err());
+
+        let acct = engine.output_repository.get_or_create_account(&1);
+        assert_eq!(acct.available, Decimal::from(0u32));
+        assert_eq!(acct.held, Decimal::from(0u32));
+        assert_eq!(acct.total, Decimal::from(0u32));
+    }
+
+    #[test]
+    fn dispute_moves_available_to_held_and_marks_disputed() {
+        let mut engine = mk_engine();
+        let dep = Transaction {
+            kind: TransactionKind::Deposit {
+                amount: Decimal::from(75u32),
+            },
+            client_id: 1,
+            transaction_id: 10,
+        };
+        engine.deposit(&dep, Decimal::from(75u32)).unwrap();
+
+        let dispute = Transaction {
+            kind: TransactionKind::Dispute,
+            client_id: 1,
+            transaction_id: 10,
+        };
+        engine.dispute(&dispute).expect("dispute ok");
+
+        let acct = engine.output_repository.get_or_create_account(&1);
+        assert_eq!(acct.available, Decimal::from(0u32));
+        assert_eq!(acct.held, Decimal::from(75u32));
+        assert_eq!(acct.available + acct.held, acct.total);
+        assert!(engine.output_repository.has_dispute(10));
+    }
+
+    #[test]
+    fn resolve_moves_held_back_and_clears_dispute() {
+        let mut engine = mk_engine();
+        let dep = Transaction {
+            kind: TransactionKind::Deposit {
+                amount: Decimal::from(40u32),
+            },
+            client_id: 2,
+            transaction_id: 20,
+        };
+        engine.deposit(&dep, Decimal::from(40u32)).unwrap();
+        let dispute = Transaction {
+            kind: TransactionKind::Dispute,
+            client_id: 2,
+            transaction_id: 20,
+        };
+        engine.dispute(&dispute).unwrap();
+
+        let resolve = Transaction {
+            kind: TransactionKind::Resolve,
+            client_id: 2,
+            transaction_id: 20,
+        };
+        engine.resolve(&resolve).expect("resolve ok");
+
+        let acct = engine.output_repository.get_or_create_account(&2);
+        assert_eq!(acct.available, Decimal::from(40u32));
+        assert_eq!(acct.held, Decimal::from(0u32));
+        assert_eq!(acct.available + acct.held, acct.total);
+        assert!(!engine.output_repository.has_dispute(20));
+    }
+
+    #[test]
+    fn chargeback_locks_account_and_adjusts_balances() {
+        let mut engine = mk_engine();
+        let dep = Transaction {
+            kind: TransactionKind::Deposit {
+                amount: Decimal::from(60u32),
+            },
+            client_id: 3,
+            transaction_id: 30,
+        };
+        engine.deposit(&dep, Decimal::from(60u32)).unwrap();
+        let dispute = Transaction {
+            kind: TransactionKind::Dispute,
+            client_id: 3,
+            transaction_id: 30,
+        };
+        engine.dispute(&dispute).unwrap();
+
+        // Perform chargeback
+        let chargeback = Transaction {
+            kind: TransactionKind::Chargeback,
+            client_id: 3,
+            transaction_id: 30,
+        };
+        engine.chargeback(chargeback).expect("chargeback ok");
+
+        let acct = engine.output_repository.get_or_create_account(&3);
+        assert!(acct.locked);
+        assert_eq!(acct.available, Decimal::from(60u32));
+        assert_eq!(acct.held, Decimal::from(0u32));
+        assert_eq!(acct.total, Decimal::from(60u32));
+    }
+}

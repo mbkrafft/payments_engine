@@ -86,3 +86,140 @@ impl<R: Read + Send + 'static> TransactionStream for CsvReader<R> {
         Box::pin(stream::iter(iter))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::io::Cursor;
+
+    fn run_stream<R: Read + Send + 'static>(
+        rdr: &mut CsvReader<R>,
+    ) -> Vec<Result<Transaction, Error>> {
+        let mut s = rdr.stream();
+        futures::executor::block_on(async move {
+            let mut out = Vec::new();
+            while let Some(item) = s.next().await {
+                out.push(item);
+            }
+            out
+        })
+    }
+
+    #[test]
+    fn parses_valid_rows_for_all_kinds() {
+        let data = b"type, client, tx, amount\n\
+deposit, 1, 1, 100.0\n\
+withdrawal, 1, 2, 30.5\n\
+dispute, 1, 1,\n\
+resolve, 1, 1,\n\
+chargeback, 1, 1,\n";
+
+        let cursor = Cursor::new(&data[..]);
+        let mut rdr = CsvReader::new(cursor).expect("csv reader");
+        let rows = run_stream(&mut rdr);
+
+        assert_eq!(rows.len(), 5);
+
+        match &rows[0] {
+            Ok(Transaction {
+                kind: TransactionKind::Deposit { amount },
+                client_id,
+                transaction_id,
+            }) => {
+                assert_eq!(*client_id, 1);
+                assert_eq!(*transaction_id, 1);
+                assert!(*amount > rust_decimal::Decimal::ZERO);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        match &rows[1] {
+            Ok(Transaction {
+                kind: TransactionKind::Withdrawal { amount },
+                client_id,
+                transaction_id,
+            }) => {
+                assert_eq!(*client_id, 1);
+                assert_eq!(*transaction_id, 2);
+                assert!(*amount > rust_decimal::Decimal::ZERO);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(matches!(
+            rows[2],
+            Ok(Transaction {
+                kind: TransactionKind::Dispute,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rows[3],
+            Ok(Transaction {
+                kind: TransactionKind::Resolve,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rows[4],
+            Ok(Transaction {
+                kind: TransactionKind::Chargeback,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn invalid_type_yields_ingestion_error() {
+        let data = b"type, client, tx, amount\nfoo, 1, 1, 10.0\n";
+        let cursor = Cursor::new(&data[..]);
+        let mut rdr = CsvReader::new(cursor).expect("csv reader");
+        let rows = run_stream(&mut rdr);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&rows[0], Err(Error::Ingestion(_))));
+    }
+
+    #[test]
+    fn missing_amount_for_deposit_is_error() {
+        let data = b"type, client, tx, amount\ndeposit, 1, 1,\n";
+        let cursor = Cursor::new(&data[..]);
+        let mut rdr = CsvReader::new(cursor).expect("csv reader");
+        let rows = run_stream(&mut rdr);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&rows[0], Err(Error::Ingestion(_))));
+    }
+
+    #[test]
+    fn extra_amount_for_dispute_is_error() {
+        let data = b"type, client, tx, amount\ndispute, 1, 1, 2.0\n";
+        let cursor = Cursor::new(&data[..]);
+        let mut rdr = CsvReader::new(cursor).expect("csv reader");
+        let rows = run_stream(&mut rdr);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&rows[0], Err(Error::Ingestion(_))));
+    }
+
+    #[test]
+    fn csv_deserialize_error_surfaces_as_ingestion_error() {
+        // invalid client id (non-numeric)
+        let data = b"type, client, tx, amount\ndeposit, a, 1, 1.0\n";
+        let cursor = Cursor::new(&data[..]);
+        let mut rdr = CsvReader::new(cursor).expect("csv reader");
+        let rows = run_stream(&mut rdr);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            matches!(&rows[0], Err(Error::Ingestion(msg)) if msg.contains("CSV deserialization error"))
+        );
+    }
+
+    #[test]
+    fn second_stream_after_consumption_is_empty() {
+        let data = b"type, client, tx, amount\ndeposit, 1, 1, 1.0\n";
+        let cursor = Cursor::new(&data[..]);
+        let mut rdr = CsvReader::new(cursor).expect("csv reader");
+        let rows1 = run_stream(&mut rdr);
+        assert_eq!(rows1.len(), 1);
+        // Now attempt to stream again from the same CsvReader instance
+        let rows2 = run_stream(&mut rdr);
+        assert!(rows2.is_empty());
+    }
+}
